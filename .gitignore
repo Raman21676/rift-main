@@ -1,0 +1,28 @@
+# Private/sensitive markdown files
+ARCHITECTURE.md
+COMPARISON.md
+NEXT_SESSION.md
+ROADMAP.md
+SESSION_LOG.md
+STATUS.md
+AGENTS.md
+*.md.bak
+
+# macOS
+.DS_Store
+
+# Rust build artifacts
+rust/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
