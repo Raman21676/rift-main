@@ -148,6 +148,9 @@ fn register_builtins(engine: &mut RiftEngine) {
         rift_tools::builtin::GitBranchTool::new()
     ));
     engine.plugins_mut().register_tool(std::sync::Arc::new(
+        rift_tools::builtin::DeployTool::new()
+    ));
+    engine.plugins_mut().register_tool(std::sync::Arc::new(
         rift_tools::builtin::WebFetchTool::new()
     ));
     engine.plugins_mut().register_tool(std::sync::Arc::new(

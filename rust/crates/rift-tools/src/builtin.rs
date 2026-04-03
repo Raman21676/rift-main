@@ -1,5 +1,6 @@
 //! Built-in tools for Rift
 
+pub mod deploy;
 pub mod edit;
 pub mod git;
 pub mod web;
@@ -10,6 +11,7 @@ use rift_core::plugin::{Tool, ToolError, ToolOutput};
 use serde_json::Value;
 use std::path::Path;
 
+pub use deploy::DeployTool;
 pub use edit::{EditFileTool, InsertAtLineTool};
 pub use git::{GitBranchTool, GitCommitTool, GitDiffTool, GitPushTool, GitStatusTool};
 pub use web::{WebFetchTool, WebSearchTool};

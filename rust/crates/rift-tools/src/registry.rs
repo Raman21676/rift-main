@@ -32,6 +32,7 @@ impl ToolRegistry {
         registry.register(Arc::new(crate::builtin::GitCommitTool::new()));
         registry.register(Arc::new(crate::builtin::GitPushTool::new()));
         registry.register(Arc::new(crate::builtin::GitBranchTool::new()));
+        registry.register(Arc::new(crate::builtin::DeployTool::new()));
         registry.register(Arc::new(crate::builtin::WebFetchTool::new()));
         registry.register(Arc::new(crate::builtin::WebSearchTool::new()));
         registry
