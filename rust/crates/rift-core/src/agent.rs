@@ -2,7 +2,7 @@
 
 use crate::capability::CapabilityManager;
 use crate::llm::{FunctionTool, LlmClient, Message, Role, ToolCall};
-use crate::planner::{Planner, PlannerError};
+use crate::planner::Planner;
 use crate::plugin::{PluginRegistry, Tool, ToolOutput, ToolError};
 use crate::task::Job;
 use serde::{Deserialize, Serialize};

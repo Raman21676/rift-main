@@ -2,9 +2,10 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use rift_core::{Message, RiftConfig, RiftEngine, TaskStatus, create_sample_config};
+use rift_core::{Message, RiftConfig, RiftEngine, SessionStore, TaskStatus, create_sample_config};
 use serde_json::Value;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 #[command(name = "rift")]
@@ -24,6 +25,10 @@ struct Cli {
     /// API base URL
     #[arg(long, env = "RIFT_BASE_URL")]
     base_url: Option<String>,
+
+    /// Session name to resume
+    #[arg(long, default_value = "default")]
+    session: String,
 }
 
 #[derive(Subcommand)]
@@ -35,16 +40,16 @@ enum Commands {
         message: Option<String>,
     },
 
-    /// Execute a single command
-    Run {
-        /// The command to execute
-        message: String,
-    },
-
     /// Plan and execute a goal autonomously
     Do {
         /// The goal to accomplish
         goal: String,
+    },
+
+    /// Execute a single command
+    Run {
+        /// The command to execute
+        message: String,
     },
 
     /// List available tools
@@ -86,7 +91,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Chat { message } => {
-            run_chat(&engine, message).await?;
+            run_chat(&engine, message, &cli.session).await?;
         }
         Commands::Run { message } => {
             run_single(&engine, &message).await?;
@@ -173,13 +178,39 @@ fn show_config(config: &RiftConfig) {
         .join(", "));
 }
 
-async fn run_chat(engine: &RiftEngine, initial: Option<String>) -> Result<()> {
+async fn run_chat(engine: &RiftEngine, initial: Option<String>, session_name: &str) -> Result<()> {
     println!("🌊 Rift - AI Coding Assistant");
-    println!("Type 'exit', 'quit', or /exit to exit. /help for commands.\n");
+    println!("Session: {} | Type 'exit', 'quit', or /exit to exit. /help for commands.\n", session_name);
 
-    let mut messages = vec![
-        Message::system("You are a helpful coding assistant. Use tools when appropriate."),
-    ];
+    let store: Option<Arc<Mutex<SessionStore>>> = match SessionStore::default() {
+        Ok(s) => Some(Arc::new(Mutex::new(s))),
+        Err(e) => {
+            eprintln!("Warning: Could not open session store: {}", e);
+            None
+        }
+    };
+
+    let session_id: Option<String> = store.as_ref()
+        .and_then(|s| s.lock().ok())
+        .and_then(|store| store.get_or_create(session_name).ok());
+
+    let mut messages: Vec<Message> = if let Some(ref sid) = session_id {
+        match store.as_ref().unwrap().lock().unwrap().load_messages(sid) {
+            Ok(mut msgs) => {
+                if msgs.is_empty() {
+                    msgs.push(Message::system("You are a helpful coding assistant. Use tools when appropriate."));
+                }
+                println!("📂 Loaded {} messages from session '{}'\n", msgs.len(), session_name);
+                msgs
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not load session: {}", e);
+                vec![Message::system("You are a helpful coding assistant. Use tools when appropriate.")]
+            }
+        }
+    } else {
+        vec![Message::system("You are a helpful coding assistant. Use tools when appropriate.")]
+    };
 
     if let Some(msg) = initial {
         messages.push(Message::user(msg));
@@ -207,7 +238,7 @@ async fn run_chat(engine: &RiftEngine, initial: Option<String>) -> Result<()> {
 
         // Handle slash commands
         if input.starts_with('/') {
-            match handle_slash_command(engine, input, &mut messages).await {
+            match handle_slash_command(engine, input, &mut messages, store.clone(), session_id.clone()).await {
                 SlashResult::Exit => break,
                 SlashResult::Continue => continue,
             }
@@ -237,6 +268,8 @@ async fn handle_slash_command(
     engine: &RiftEngine,
     input: &str,
     messages: &mut Vec<Message>,
+    store: Option<Arc<Mutex<SessionStore>>>,
+    session_id: Option<String>,
 ) -> SlashResult {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.is_empty() {
@@ -251,6 +284,7 @@ async fn handle_slash_command(
             println!("  /tool <name> <arg> Execute a tool directly");
             println!("  /tools             List available tools");
             println!("  /status            Show session status");
+            println!("  /sessions          List saved sessions");
             println!("  /clear             Clear conversation history");
             println!("  /model <name>      Show/switch model (requires restart)");
             println!("  /exit, /quit       Exit the chat");
@@ -266,7 +300,34 @@ async fn handle_slash_command(
         "/clear" => {
             messages.clear();
             messages.push(Message::system("You are a helpful coding assistant. Use tools when appropriate."));
+            if let (Some(ref sid), Some(ref st)) = (session_id, store) {
+                if let Ok(store) = st.lock() {
+                    let _ = store.clear_messages(sid);
+                }
+            }
             println!("Conversation cleared.");
+        }
+        "/sessions" => {
+            if let Some(ref st) = store {
+                if let Ok(store) = st.lock() {
+                    match store.list_sessions() {
+                        Ok(sessions) => {
+                            if sessions.is_empty() {
+                                println!("No saved sessions.");
+                            } else {
+                                println!("Saved sessions:");
+                                for (_, name, _) in sessions {
+                                    let marker = if Some(name.clone()) == session_id { " (current)" } else { "" };
+                                    println!("  - {}{}", name, marker);
+                                }
+                            }
+                        }
+                        Err(e) => println!("Error listing sessions: {}", e),
+                    }
+                }
+            } else {
+                println!("Session store not available.");
+            }
         }
         "/tools" => {
             list_tools(engine);

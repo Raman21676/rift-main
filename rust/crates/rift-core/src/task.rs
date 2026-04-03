@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 /// Trait for task executors
