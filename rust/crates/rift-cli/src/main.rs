@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use rift_core::{Message, RiftConfig, RiftEngine, create_sample_config};
+use rift_core::{Message, RiftConfig, RiftEngine, TaskStatus, create_sample_config};
 use serde_json::Value;
 use std::io::Write;
 
@@ -39,6 +39,12 @@ enum Commands {
     Run {
         /// The command to execute
         message: String,
+    },
+
+    /// Plan and execute a goal autonomously
+    Do {
+        /// The goal to accomplish
+        goal: String,
     },
 
     /// List available tools
@@ -84,6 +90,9 @@ async fn main() -> Result<()> {
         }
         Commands::Run { message } => {
             run_single(&engine, &message).await?;
+        }
+        Commands::Do { goal } => {
+            run_goal(&engine, &goal).await?;
         }
         Commands::Tools => {
             list_tools(&engine);
@@ -238,6 +247,7 @@ async fn handle_slash_command(
         "/help" | "/h" => {
             println!("Available commands:");
             println!("  /help              Show this help message");
+            println!("  /plan <goal>       Plan and execute a goal autonomously");
             println!("  /tool <name> <arg> Execute a tool directly");
             println!("  /tools             List available tools");
             println!("  /status            Show session status");
@@ -274,6 +284,18 @@ async fn handle_slash_command(
                 println!("Run with: rift --model {} chat", parts[1]);
             } else {
                 println!("Current model: {}", engine.llm().config().model);
+            }
+        }
+        "/plan" => {
+            if parts.len() < 2 {
+                println!("Usage: /plan <goal>");
+                println!("Example: /plan make a snake game in HTML");
+                return SlashResult::Continue;
+            }
+            let goal = parts[1..].join(" ");
+            println!("Planning: {}", goal);
+            if let Err(e) = run_goal(engine, &goal).await {
+                println!("Execution failed: {}", e);
             }
         }
         "/tool" => {
@@ -330,6 +352,72 @@ async fn run_single(engine: &RiftEngine, message: &str) -> Result<()> {
     ];
 
     process_message(engine, &messages).await?;
+    Ok(())
+}
+
+async fn run_goal(engine: &RiftEngine, goal: &str) -> Result<()> {
+    let agent = engine.agent();
+    
+    println!("🧠 Planning tasks...\n");
+    let mut job = match agent.plan_job(goal).await {
+        Ok(job) => job,
+        Err(e) => {
+            anyhow::bail!("Planning failed: {}", e);
+        }
+    };
+
+    println!("📋 Plan created with {} tasks:", job.tasks.len());
+    // Build id -> name map for pretty dependency display
+    let id_to_name: std::collections::HashMap<_, _> = job.tasks.iter()
+        .map(|(id, task)| (*id, task.name.clone()))
+        .collect();
+    for (_, task) in &job.tasks {
+        let deps = if task.dependencies.is_empty() {
+            "none".to_string()
+        } else {
+            task.dependencies.iter()
+                .map(|d| id_to_name.get(d).cloned().unwrap_or_else(|| d.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!("  • {} (tool: {}, deps: {})", task.name, task.tool_name, deps);
+    }
+    println!();
+
+    println!("⚙️  Executing...\n");
+    match engine.execute_job(&mut job).await {
+        Ok(result) => {
+            if result.success {
+                println!("✅ All tasks completed successfully!");
+            } else {
+                println!("⚠️  Some tasks failed.");
+            }
+
+            println!("\n📊 Results:");
+            for (_, task) in &job.tasks {
+                let icon = match task.status {
+                    TaskStatus::Completed => "✅",
+                    TaskStatus::Failed => "❌",
+                    _ => "⏳",
+                };
+                println!("  {} {} - {:?}", icon, task.name, task.status);
+                if let Some(ref res) = task.result {
+                    let preview = if res.output.len() > 200 {
+                        format!("{}...", &res.output[..200])
+                    } else {
+                        res.output.clone()
+                    };
+                    for line in preview.lines() {
+                        println!("      {}", line);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            anyhow::bail!("Job execution failed: {}", e);
+        }
+    }
+
     Ok(())
 }
 

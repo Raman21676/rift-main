@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Trait for task executors
 pub trait TaskExecutor: Send + Sync {
@@ -208,11 +208,33 @@ impl TaskOrchestrator {
         E: TaskExecutor,
     {
         let order = job.execution_order()?;
-        let completed = Arc::new(RwLock::new(HashSet::<TaskId>::new()));
+        let mut succeeded = HashSet::<TaskId>::new();
+        let mut executed = HashSet::<TaskId>::new();
         
         info!("Running job '{}' with {} tasks", job.name, order.len());
         
-        for batch in self.batches(&order, job) {
+        loop {
+            let batch = self.next_batch(&order, job, &succeeded);
+            
+            if batch.is_empty() {
+                // Mark any remaining unexecuted tasks as skipped due to failed deps
+                for id in &order {
+                    if !executed.contains(id) {
+                        let task = job.tasks.get_mut(id).unwrap();
+                        if task.status == TaskStatus::Pending {
+                            task.status = TaskStatus::Failed;
+                            task.result = Some(TaskResult {
+                                success: false,
+                                output: "Skipped: dependency failed".to_string(),
+                                data: None,
+                                execution_time_ms: 0,
+                            });
+                        }
+                    }
+                }
+                break;
+            }
+            
             let batch_size = batch.len();
             debug!("Executing batch of {} tasks", batch_size);
             
@@ -221,7 +243,6 @@ impl TaskOrchestrator {
                 task.status = TaskStatus::Running;
             }
             
-            // Clone batch IDs before consuming
             let batch_ids: Vec<_> = batch.clone();
             
             let futures: Vec<_> = batch
@@ -234,6 +255,7 @@ impl TaskOrchestrator {
             
             for (idx, result) in futures.into_iter().enumerate() {
                 let id = batch_ids[idx];
+                executed.insert(id);
                 match result.await {
                     Ok(result) => {
                         let task = job.tasks.get_mut(&id).unwrap();
@@ -242,8 +264,10 @@ impl TaskOrchestrator {
                         } else {
                             TaskStatus::Failed
                         };
+                        if result.success {
+                            succeeded.insert(id);
+                        }
                         task.result = Some(result);
-                        completed.write().await.insert(id);
                     }
                     Err(e) => {
                         let task = job.tasks.get_mut(&id).unwrap();
@@ -272,49 +296,40 @@ impl TaskOrchestrator {
         })
     }
     
-    /// Group tasks into batches that can run concurrently
-    fn batches(&self, order: &[TaskId], job: &Job) -> Vec<Vec<TaskId>> {
-        let mut batches = Vec::new();
-        let mut completed = HashSet::new();
-        let mut remaining: Vec<_> = order.to_vec();
+    /// Get the next batch of tasks that can run concurrently
+    fn next_batch(&self, order: &[TaskId], job: &Job, succeeded: &HashSet<TaskId>) -> Vec<TaskId> {
+        let mut batch = Vec::new();
         
-        while !remaining.is_empty() {
-            let mut batch = Vec::new();
-            let mut still_pending = Vec::new();
-            
-            for id in remaining {
-                if batch.len() >= self.max_concurrent {
-                    still_pending.push(id);
-                    continue;
-                }
-                
-                let task = job.tasks.get(&id).unwrap();
-                let deps_satisfied = task.dependencies.iter().all(|d| completed.contains(d));
-                
-                if deps_satisfied {
-                    batch.push(id);
-                } else {
-                    still_pending.push(id);
-                }
-            }
-            
-            if batch.is_empty() && !still_pending.is_empty() {
-                // This shouldn't happen if dependencies are valid
-                warn!("Deadlock detected in task dependencies");
+        for id in order {
+            if batch.len() >= self.max_concurrent {
                 break;
             }
             
-            for id in &batch {
-                completed.insert(*id);
+            let task = job.tasks.get(id).unwrap();
+            
+            // Skip already executed or running tasks
+            if task.status != TaskStatus::Pending {
+                continue;
             }
             
-            if !batch.is_empty() {
-                batches.push(batch);
+            let has_failed_dep = task.dependencies.iter().any(|d| {
+                job.tasks.get(d).map(|t| {
+                    t.result.as_ref().map(|r| !r.success).unwrap_or(false)
+                }).unwrap_or(false)
+            });
+            
+            if has_failed_dep {
+                continue;
             }
-            remaining = still_pending;
+            
+            let deps_satisfied = task.dependencies.iter().all(|d| succeeded.contains(d));
+            
+            if deps_satisfied {
+                batch.push(*id);
+            }
         }
         
-        batches
+        batch
     }
 }
 

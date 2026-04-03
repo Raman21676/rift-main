@@ -2,7 +2,9 @@
 
 use crate::capability::CapabilityManager;
 use crate::llm::{FunctionTool, LlmClient, Message, Role, ToolCall};
+use crate::planner::{Planner, PlannerError};
 use crate::plugin::{PluginRegistry, Tool, ToolOutput, ToolError};
+use crate::task::Job;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -296,6 +298,19 @@ impl Agent {
             .await
             .map_err(|e| AgentError::Tool(e.to_string()))
     }
+    
+    /// Plan a natural language goal into an executable Job
+    pub async fn plan_job(&self, goal: &str) -> Result<Job, AgentError> {
+        let tools: Vec<String> = self.plugin_registry
+            .tools()
+            .keys()
+            .cloned()
+            .collect();
+        
+        let planner = Planner::new(self.llm_client.clone(), tools);
+        planner.plan(goal).await
+            .map_err(|e| AgentError::Planner(e.to_string()))
+    }
 }
 
 /// Agent errors
@@ -318,4 +333,7 @@ pub enum AgentError {
     
     #[error("Parse error: {0}")]
     Parse(String),
+    
+    #[error("Planner error: {0}")]
+    Planner(String),
 }

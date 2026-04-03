@@ -28,7 +28,7 @@ impl LlmConfig {
             model: "gpt-4o-mini".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             temperature: 0.7,
-            max_tokens: None,
+            max_tokens: Some(4096),
         }
     }
     
