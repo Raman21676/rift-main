@@ -19,3 +19,4 @@ glob = "0.3"
 regex = "1"
 urlencoding = "2"
 reqwest = { workspace = true }
+git2 = "0.19"

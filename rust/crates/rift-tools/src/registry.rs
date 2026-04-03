@@ -27,6 +27,11 @@ impl ToolRegistry {
         registry.register(Arc::new(crate::builtin::GrepTool::new()));
         registry.register(Arc::new(crate::builtin::EditFileTool::new()));
         registry.register(Arc::new(crate::builtin::InsertAtLineTool::new()));
+        registry.register(Arc::new(crate::builtin::GitStatusTool::new()));
+        registry.register(Arc::new(crate::builtin::GitDiffTool::new()));
+        registry.register(Arc::new(crate::builtin::GitCommitTool::new()));
+        registry.register(Arc::new(crate::builtin::GitPushTool::new()));
+        registry.register(Arc::new(crate::builtin::GitBranchTool::new()));
         registry.register(Arc::new(crate::builtin::WebFetchTool::new()));
         registry.register(Arc::new(crate::builtin::WebSearchTool::new()));
         registry

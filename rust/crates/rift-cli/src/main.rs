@@ -119,6 +119,21 @@ fn register_builtins(engine: &mut RiftEngine) {
         rift_tools::builtin::InsertAtLineTool::new()
     ));
     engine.plugins_mut().register_tool(std::sync::Arc::new(
+        rift_tools::builtin::GitStatusTool::new()
+    ));
+    engine.plugins_mut().register_tool(std::sync::Arc::new(
+        rift_tools::builtin::GitDiffTool::new()
+    ));
+    engine.plugins_mut().register_tool(std::sync::Arc::new(
+        rift_tools::builtin::GitCommitTool::new()
+    ));
+    engine.plugins_mut().register_tool(std::sync::Arc::new(
+        rift_tools::builtin::GitPushTool::new()
+    ));
+    engine.plugins_mut().register_tool(std::sync::Arc::new(
+        rift_tools::builtin::GitBranchTool::new()
+    ));
+    engine.plugins_mut().register_tool(std::sync::Arc::new(
         rift_tools::builtin::WebFetchTool::new()
     ));
     engine.plugins_mut().register_tool(std::sync::Arc::new(

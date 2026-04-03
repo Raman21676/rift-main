@@ -1,6 +1,7 @@
 //! Built-in tools for Rift
 
 pub mod edit;
+pub mod git;
 pub mod web;
 
 use async_trait::async_trait;
@@ -10,6 +11,7 @@ use serde_json::Value;
 use std::path::Path;
 
 pub use edit::{EditFileTool, InsertAtLineTool};
+pub use git::{GitBranchTool, GitCommitTool, GitDiffTool, GitPushTool, GitStatusTool};
 pub use web::{WebFetchTool, WebSearchTool};
 
 /// Bash shell tool
