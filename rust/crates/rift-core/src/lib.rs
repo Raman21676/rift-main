@@ -8,12 +8,14 @@
 
 pub mod agent;
 pub mod capability;
+pub mod config;
 pub mod llm;
 pub mod plugin;
 pub mod task;
 
 pub use agent::{Agent, AgentError, ToolDefinition, ToolInvocation};
 pub use capability::{Capability, CapabilityManager, CapabilityError};
+pub use config::{ConfigFile, create_sample_config, ensure_config_dir};
 pub use llm::{FunctionTool, LlmClient, LlmConfig, Message, Role, StreamingResponse, ChatResponse, ToolCall};
 pub use plugin::{Plugin, PluginRegistry, Tool, ToolOutput, ToolError, ToolManifest};
 pub use task::{Job, Task, TaskId, TaskOrchestrator, TaskResult, TaskStatus, TaskError, TaskExecutor};
@@ -26,6 +28,7 @@ pub struct RiftEngine {
     orchestrator: TaskOrchestrator,
     capability_manager: CapabilityManager,
     llm_client: LlmClient,
+    max_iterations: usize,
 }
 
 impl RiftEngine {
@@ -36,6 +39,7 @@ impl RiftEngine {
             orchestrator: TaskOrchestrator::new(),
             capability_manager: CapabilityManager::with_capabilities(config.capabilities.clone()),
             llm_client: LlmClient::new(config.llm.clone()),
+            max_iterations: config.max_iterations,
         }
     }
     
@@ -71,6 +75,7 @@ impl RiftEngine {
             Arc::new(self.plugin_registry.clone()),
             Arc::new(self.capability_manager.clone()),
         )
+        .with_max_iterations(self.max_iterations)
     }
     
     /// Execute a job
@@ -121,6 +126,8 @@ pub struct RiftConfig {
     pub capabilities: Vec<Capability>,
     /// Maximum concurrent tasks
     pub max_concurrent_tasks: usize,
+    /// Maximum agent iterations
+    pub max_iterations: usize,
 }
 
 impl RiftConfig {
@@ -135,6 +142,7 @@ impl RiftConfig {
                 Capability::NetworkAccess,
             ],
             max_concurrent_tasks: 4,
+            max_iterations: 10,
         }
     }
     
@@ -155,10 +163,42 @@ impl RiftConfig {
         self.capabilities = caps;
         self
     }
+
+    /// Load configuration from file and environment
+    pub fn load() -> Self {
+        let file_config = ConfigFile::load();
+
+        // API key priority: env var > config file
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .or_else(|| file_config.api.key.clone())
+            .unwrap_or_default();
+
+        let mut llm = LlmConfig::new(api_key);
+        llm.model = file_config.api.model.clone();
+        llm.base_url = file_config.api.base_url.clone();
+
+        // Allow env overrides for model and base_url
+        if let Ok(model) = std::env::var("RIFT_MODEL") {
+            llm.model = model;
+        }
+        if let Ok(base_url) = std::env::var("RIFT_BASE_URL") {
+            llm.base_url = base_url;
+        }
+
+        let capabilities = file_config.parse_capabilities();
+
+        Self {
+            llm,
+            capabilities,
+            max_concurrent_tasks: file_config.runtime.max_concurrent_tasks,
+            max_iterations: file_config.runtime.max_iterations,
+        }
+    }
 }
 
 impl Default for RiftConfig {
     fn default() -> Self {
-        Self::new("")
+        Self::load()
     }
 }

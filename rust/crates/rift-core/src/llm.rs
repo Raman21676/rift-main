@@ -102,6 +102,11 @@ impl LlmClient {
             client: reqwest::Client::new(),
         }
     }
+
+    /// Get the configuration
+    pub fn config(&self) -> &LlmConfig {
+        &self.config
+    }
     
     /// Send a chat request (non-streaming)
     pub async fn chat(&self, messages: Vec<Message>) -> Result<String, LlmError> {

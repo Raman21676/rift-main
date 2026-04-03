@@ -2,7 +2,8 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use rift_core::{Message, RiftConfig, RiftEngine};
+use rift_core::{Message, RiftConfig, RiftEngine, create_sample_config};
+use serde_json::Value;
 use std::io::Write;
 
 #[derive(Parser)]
@@ -11,18 +12,18 @@ use std::io::Write;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-    
-    /// API key (or set OPENAI_API_KEY env var)
+
+    /// API key (or set OPENAI_API_KEY env var, or put in config file)
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
-    
+
     /// Model to use
-    #[arg(long, env = "RIFT_MODEL", default_value = "gpt-4o-mini")]
-    model: String,
-    
-    /// API base URL (default: OpenAI, use https://openrouter.ai/api/v1 for OpenRouter)
-    #[arg(long, env = "RIFT_BASE_URL", default_value = "https://api.openai.com/v1")]
-    base_url: String,
+    #[arg(long, env = "RIFT_MODEL")]
+    model: Option<String>,
+
+    /// API base URL
+    #[arg(long, env = "RIFT_BASE_URL")]
+    base_url: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -33,33 +34,69 @@ enum Commands {
         #[arg(short, long)]
         message: Option<String>,
     },
-    
+
     /// Execute a single command
     Run {
         /// The command to execute
         message: String,
     },
-    
+
     /// List available tools
     Tools,
+
+    /// Show configuration info
+    Config,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    
+
     let cli = Cli::parse();
-    
-    let api_key = cli.api_key.ok_or_else(|| {
-        anyhow::anyhow!("API key required. Set OPENAI_API_KEY or use --api-key")
-    })?;
-    
-    let config = RiftConfig::new(api_key)
-        .with_model(cli.model)
-        .with_base_url(cli.base_url);
-    let mut engine = RiftEngine::new(config);
-    
-    // Register built-in tools
+
+    let mut config = RiftConfig::load();
+
+    // CLI overrides take highest priority
+    if let Some(key) = cli.api_key {
+        config.llm.api_key = key;
+    }
+    if let Some(model) = cli.model {
+        config.llm.model = model;
+    }
+    if let Some(base_url) = cli.base_url {
+        config.llm.base_url = base_url;
+    }
+
+    if config.llm.api_key.is_empty() {
+        eprintln!("Error: API key required.");
+        eprintln!("  Set OPENAI_API_KEY environment variable, or");
+        eprintln!("  Add to ~/.config/rift/config.toml: [api] key = \"...\"");
+        eprintln!("  Or use: rift --api-key <key> <command>");
+        std::process::exit(1);
+    }
+
+    let mut engine = RiftEngine::new(config.clone());
+    register_builtins(&mut engine);
+
+    match cli.command {
+        Commands::Chat { message } => {
+            run_chat(&engine, message).await?;
+        }
+        Commands::Run { message } => {
+            run_single(&engine, &message).await?;
+        }
+        Commands::Tools => {
+            list_tools(&engine);
+        }
+        Commands::Config => {
+            show_config(&config);
+        }
+    }
+
+    Ok(())
+}
+
+fn register_builtins(engine: &mut RiftEngine) {
     engine.plugins_mut().register_tool(std::sync::Arc::new(
         rift_tools::builtin::BashTool::new()
     ));
@@ -87,53 +124,73 @@ async fn main() -> Result<()> {
     engine.plugins_mut().register_tool(std::sync::Arc::new(
         rift_tools::builtin::WebSearchTool::new()
     ));
-    
-    match cli.command {
-        Commands::Chat { message } => {
-            run_chat(&engine, message).await?;
-        }
-        Commands::Run { message } => {
-            run_single(&engine, &message).await?;
-        }
-        Commands::Tools => {
-            list_tools(&engine);
+}
+
+fn show_config(config: &RiftConfig) {
+    println!("🌊 Rift Configuration");
+    println!();
+    if let Some(path) = rift_core::ConfigFile::config_path() {
+        println!("Config file: {}", path.display());
+        if !path.exists() {
+            println!("  (file does not exist yet)");
+            if let Ok(sample_path) = create_sample_config() {
+                println!("  Created sample config at: {}", sample_path.display());
+            }
         }
     }
-    
-    Ok(())
+    println!();
+    println!("Model:       {}", config.llm.model);
+    println!("Base URL:    {}", config.llm.base_url);
+    println!("API Key:     {}...", &config.llm.api_key[..config.llm.api_key.len().min(8)]);
+    println!("Max tasks:   {}", config.max_concurrent_tasks);
+    println!("Capabilities: {}", config.capabilities.iter()
+        .map(|c| format!("{:?}", c))
+        .collect::<Vec<_>>()
+        .join(", "));
 }
 
 async fn run_chat(engine: &RiftEngine, initial: Option<String>) -> Result<()> {
     println!("🌊 Rift - AI Coding Assistant");
-    println!("Type 'exit' or 'quit' to exit\n");
-    
+    println!("Type 'exit', 'quit', or /exit to exit. /help for commands.\n");
+
     let mut messages = vec![
         Message::system("You are a helpful coding assistant. Use tools when appropriate."),
     ];
-    
+
     if let Some(msg) = initial {
         messages.push(Message::user(msg));
-        process_message(engine, &messages).await?;
+        match process_message(engine, &messages).await {
+            Ok(response) => messages.push(Message::assistant(response)),
+            Err(e) => eprintln!("Error: {}", e),
+        }
     }
-    
+
     loop {
         print!("\n> ");
         std::io::stdout().flush()?;
-        
+
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
-        
+
         let input = input.trim();
         if input.is_empty() {
             continue;
         }
-        
+
         if input == "exit" || input == "quit" {
             break;
         }
-        
+
+        // Handle slash commands
+        if input.starts_with('/') {
+            match handle_slash_command(engine, input, &mut messages).await {
+                SlashResult::Exit => break,
+                SlashResult::Continue => continue,
+            }
+        }
+
         messages.push(Message::user(input));
-        
+
         match process_message(engine, &messages).await {
             Ok(response) => {
                 messages.push(Message::assistant(response));
@@ -143,22 +200,125 @@ async fn run_chat(engine: &RiftEngine, initial: Option<String>) -> Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
+
+enum SlashResult {
+    Exit,
+    Continue,
+}
+
+async fn handle_slash_command(
+    engine: &RiftEngine,
+    input: &str,
+    messages: &mut Vec<Message>,
+) -> SlashResult {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.is_empty() {
+        return SlashResult::Continue;
+    }
+
+    match parts[0] {
+        "/help" | "/h" => {
+            println!("Available commands:");
+            println!("  /help              Show this help message");
+            println!("  /tool <name> <arg> Execute a tool directly");
+            println!("  /tools             List available tools");
+            println!("  /status            Show session status");
+            println!("  /clear             Clear conversation history");
+            println!("  /model <name>      Show/switch model (requires restart)");
+            println!("  /exit, /quit       Exit the chat");
+            println!();
+            println!("Tool examples:");
+            println!("  /tool bash '{{\"command\":\"ls -la\"}}'");
+            println!("  /tool read_file '{{\"path\":\"src/main.rs\"}}'");
+            println!("  /tool web_search '{{\"query\":\"rust async\"}}'");
+        }
+        "/exit" | "/quit" => {
+            return SlashResult::Exit;
+        }
+        "/clear" => {
+            messages.clear();
+            messages.push(Message::system("You are a helpful coding assistant. Use tools when appropriate."));
+            println!("Conversation cleared.");
+        }
+        "/tools" => {
+            list_tools(engine);
+        }
+        "/status" => {
+            println!("Messages in session: {}", messages.len());
+            println!("Model: {}", engine.llm().config().model);
+            println!("Base URL: {}", engine.llm().config().base_url);
+            println!("Tools registered: {}", engine.plugins().list_tools().len());
+        }
+        "/model" => {
+            if parts.len() > 1 {
+                println!("Model switch requires restarting Rift.");
+                println!("Current model: {}", engine.llm().config().model);
+                println!("Run with: rift --model {} chat", parts[1]);
+            } else {
+                println!("Current model: {}", engine.llm().config().model);
+            }
+        }
+        "/tool" => {
+            if parts.len() < 2 {
+                println!("Usage: /tool <name> [json_args]");
+                println!("Example: /tool bash '{{\"command\":\"ls -la\"}}'");
+                return SlashResult::Continue;
+            }
+
+            let tool_name = parts[1];
+            let args_json = if parts.len() >= 3 {
+                parts[2..].join(" ")
+            } else {
+                "{}".to_string()
+            };
+
+            let args: Value = match serde_json::from_str(&args_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("Failed to parse arguments as JSON: {}", e);
+                    println!("Example: /tool bash '{{\"command\":\"ls -la\"}}'");
+                    return SlashResult::Continue;
+                }
+            };
+
+            let agent = engine.agent();
+            match agent.execute_tool_direct(tool_name, args).await {
+                Ok(output) => {
+                    println!("\n[{}] {}", tool_name, if output.success { "✓" } else { "✗" });
+                    println!("{}", output.content);
+                    if let Some(data) = output.data {
+                        println!("Data: {}", serde_json::to_string_pretty(&data).unwrap_or_default());
+                    }
+                }
+                Err(e) => {
+                    println!("Tool execution failed: {}", e);
+                }
+            }
+        }
+        _ => {
+            println!("Unknown command: {}", parts[0]);
+            println!("Type /help for available commands.");
+        }
+    }
+
+    SlashResult::Continue
+}
+
 
 async fn run_single(engine: &RiftEngine, message: &str) -> Result<()> {
     let messages = vec![
         Message::system("You are a helpful coding assistant."),
         Message::user(message.to_string()),
     ];
-    
+
     process_message(engine, &messages).await?;
     Ok(())
 }
 
 async fn process_message(engine: &RiftEngine, _messages: &[Message]) -> Result<String> {
-    // Use agent for tool-enabled chat
     let agent = engine.agent();
     let user_message = _messages.last()
         .map(|m| m.content.clone())
