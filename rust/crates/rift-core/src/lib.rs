@@ -10,6 +10,7 @@ pub mod agent;
 pub mod capability;
 pub mod config;
 pub mod context;
+pub mod daemon;
 pub mod llm;
 pub mod planner;
 pub mod plugin;
@@ -30,6 +31,7 @@ pub use self_correct::orchestrator::SelfCorrectingOrchestrator;
 pub use session::{SessionStore, SessionError};
 pub use task::{Job, Task, TaskId, TaskOrchestrator, TaskResult, TaskStatus, TaskError, TaskExecutor};
 pub use verify::{Verifier, VerificationResult, CheckResult, VerificationType};
+pub use daemon::{Daemon, DaemonState, DaemonError, DaemonCommand, DaemonResponse, TaskQueue, QueuedTask, QueueStatus, DaemonClient};
 
 use std::sync::Arc;
 
