@@ -101,9 +101,16 @@ impl RiftEngine {
     pub async fn execute_job_with_self_correction(&self, job: &mut Job) -> Result<task::JobResult, TaskError> {
         use self_correct::orchestrator::SelfCorrectingOrchestrator;
         
+        // Get list of available tools
+        let tools: Vec<String> = self.plugin_registry.list_tools()
+            .iter()
+            .map(|&s| s.to_string())
+            .collect();
+        
         let mut orchestrator = SelfCorrectingOrchestrator::new()
             .with_self_correction(self.llm_client.clone())
-            .with_max_concurrent(4);
+            .with_max_concurrent(4)
+            .with_tools(tools);
             
         orchestrator.run(job, self).await
     }

@@ -67,6 +67,7 @@ pub struct SelfCorrector {
     max_retries: u32,
     retry_states: HashMap<TaskId, RetryState>,
     enabled: bool,
+    pub(crate) available_tools: Vec<String>,
 }
 
 impl SelfCorrector {
@@ -77,6 +78,7 @@ impl SelfCorrector {
             max_retries: DEFAULT_MAX_RETRIES,
             retry_states: HashMap::new(),
             enabled: true,
+            available_tools: Vec::new(),
         }
     }
 
@@ -89,6 +91,12 @@ impl SelfCorrector {
     /// Set max retries
     pub fn with_max_retries(mut self, max: u32) -> Self {
         self.max_retries = max;
+        self
+    }
+    
+    /// Set available tools for the correction prompt
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.available_tools = tools;
         self
     }
 
@@ -178,6 +186,12 @@ impl SelfCorrector {
             completed_tasks.join("\n")
         };
 
+        let tools_str = if job_context.available_tools.is_empty() {
+            "bash, read_file, write_file, glob, grep, edit_file, insert_at_line, git_status, git_commit, git_push, git_branch, web_fetch, web_search, deploy".to_string()
+        } else {
+            job_context.available_tools.join(", ")
+        };
+        
         format!(
             "You are analyzing a task failure in an autonomous AI system.
 
@@ -198,6 +212,9 @@ JOB CONTEXT:
 - Failed tasks:
 {}
 
+AVAILABLE TOOLS (use ONLY these tool names):
+{}
+
 Analyze the failure and respond in this exact JSON format:
 {{
     \"reason\": \"Brief explanation of why it failed\",
@@ -209,7 +226,7 @@ Analyze the failure and respond in this exact JSON format:
 For strategy:
 - \"Retry\": Use for transient failures (network timeout, rate limit) - same input
 - \"Modify\": Use when input needs fixing (wrong path, syntax error) - provide corrected input
-- \"AddPrerequisite\": Use when something else needs to be done first (missing directory, wrong branch)
+- \"AddPrerequisite\": Use when something else needs to be done first (e.g., use 'bash' with 'mkdir' to create missing directories, use 'write_file' to create missing files)
 - \"Skip\": Use only if task is truly optional
 - \"Fail\": Use when error is unrecoverable (insufficient permissions, fundamental impossibility)
 
@@ -218,8 +235,10 @@ If using \"Modify\", also include:
 
 If using \"AddPrerequisite\", also include:
 - \"prerequisite_tasks\": [
-    {{\"name\": \"task_name\", \"tool_name\": \"tool\", \"input\": {{}}, \"description\": \"what this does\"}}
+    {{\"name\": \"task_name\", \"tool_name\": \"TOOL_NAME_FROM_LIST_ABOVE\", \"input\": {{}}, \"description\": \"what this does\"}}
   ]
+
+IMPORTANT: Only use tool names from the AVAILABLE TOOLS list above.
 
 Respond with ONLY the JSON object, no other text.",
             task.name,
@@ -231,7 +250,8 @@ Respond with ONLY the JSON object, no other text.",
             result.output,
             job_context.job_name,
             completed_str,
-            job_context.failed_tasks.join(", ")
+            job_context.failed_tasks.join(", "),
+            tools_str
         )
     }
 
@@ -337,36 +357,45 @@ Respond with ONLY the JSON object, no other text.",
                 let failed_task = job.tasks.get(&failed_task_id)
                     .ok_or_else(|| CorrectionError::TaskNotFound(failed_task_id))?;
                 
+                // Save the failed task's original dependencies
+                let original_deps = failed_task.dependencies.clone();
+                
                 info!("Adding {} prerequisite task(s) for '{}'", 
                     new_tasks.len(), failed_task.name
                 );
 
                 let mut new_task_ids = Vec::new();
-                let mut last_new_id = failed_task_id;
+                let mut prev_id: Option<TaskId> = None;
 
                 // Add new tasks before the failed task
-                for corrective in new_tasks {
+                // Chain: original_deps -> first_new_task -> second_new_task -> ... -> failed_task
+                for (idx, corrective) in new_tasks.iter().enumerate() {
                     let mut new_task = Task::new(
                         corrective.name.clone(),
                         corrective.tool_name.clone(),
                         corrective.input.clone(),
                     );
                     new_task.description = corrective.description.clone();
-                    new_task.dependencies = vec![last_new_id]; // Chain them
+                    
+                    // First task depends on original dependencies of failed task
+                    // Subsequent tasks depend on the previous new task
+                    if idx == 0 {
+                        new_task.dependencies = original_deps.clone();
+                    } else if let Some(prev) = prev_id {
+                        new_task.dependencies = vec![prev];
+                    }
                     
                     let new_id = new_task.id;
                     job.add_task(new_task);
                     new_task_ids.push(new_id);
-                    last_new_id = new_id;
+                    prev_id = Some(new_id);
                 }
 
-                // Update failed task to depend on the last new task
+                // Update failed task to depend on the last new task (instead of original deps)
                 if let Some(task) = job.tasks.get_mut(&failed_task_id) {
-                    // Remove old dependencies that might conflict
-                    task.dependencies.retain(|id| !new_task_ids.contains(id));
-                    // Add dependency on the last prerequisite
-                    if !task.dependencies.contains(&last_new_id) {
-                        task.dependencies.push(last_new_id);
+                    // Replace dependencies with just the last new task
+                    if let Some(last_id) = new_task_ids.last() {
+                        task.dependencies = vec![*last_id];
                     }
                     task.status = TaskStatus::Pending;
                     task.result = None;
@@ -415,6 +444,7 @@ pub struct JobContext {
     pub job_name: String,
     pub completed_tasks: Vec<(String, String)>, // (name, output_summary)
     pub failed_tasks: Vec<String>,
+    pub available_tools: Vec<String>,
 }
 
 impl JobContext {
@@ -423,6 +453,7 @@ impl JobContext {
             job_name: job_name.into(),
             completed_tasks: Vec::new(),
             failed_tasks: Vec::new(),
+            available_tools: Vec::new(),
         }
     }
 
@@ -432,6 +463,11 @@ impl JobContext {
 
     pub fn add_failed(&mut self, name: impl Into<String>) {
         self.failed_tasks.push(name.into());
+    }
+    
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.available_tools = tools;
+        self
     }
 }
 

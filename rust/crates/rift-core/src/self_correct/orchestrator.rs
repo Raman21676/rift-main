@@ -14,6 +14,7 @@ pub struct SelfCorrectingOrchestrator {
     max_concurrent: usize,
     corrector: Option<SelfCorrector>,
     max_corrections: u32,
+    available_tools: Vec<String>,
 }
 
 impl SelfCorrectingOrchestrator {
@@ -23,12 +24,22 @@ impl SelfCorrectingOrchestrator {
             max_concurrent: 4,
             corrector: None,
             max_corrections: 10,
+            available_tools: Vec::new(),
         }
     }
 
     /// Enable self-correction with an LLM client
     pub fn with_self_correction(mut self, llm_client: LlmClient) -> Self {
         self.corrector = Some(SelfCorrector::new(llm_client));
+        self
+    }
+    
+    /// Set available tools for correction suggestions
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.available_tools = tools.clone();
+        if let Some(ref mut corrector) = self.corrector {
+            corrector.available_tools = tools;
+        }
         self
     }
 
@@ -298,6 +309,13 @@ impl SelfCorrectingOrchestrator {
     /// Build context about the job for failure analysis
     fn build_job_context(&self, job: &Job) -> JobContext {
         let mut context = JobContext::new(&job.name);
+        
+        // Add available tools from corrector if present
+        if let Some(ref corrector) = self.corrector {
+            context.available_tools = corrector.available_tools.clone();
+        } else {
+            context.available_tools = self.available_tools.clone();
+        }
 
         for (_, task) in &job.tasks {
             if let Some(ref result) = task.result {
