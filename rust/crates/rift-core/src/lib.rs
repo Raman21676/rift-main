@@ -16,6 +16,7 @@ pub mod plugin;
 pub mod self_correct;
 pub mod session;
 pub mod task;
+pub mod verify;
 
 pub use agent::{Agent, AgentError, ToolDefinition, ToolInvocation};
 pub use capability::{Capability, CapabilityManager, CapabilityError};
@@ -28,6 +29,7 @@ pub use self_correct::{SelfCorrector, JobContext, FailureAnalysis, CorrectionStr
 pub use self_correct::orchestrator::SelfCorrectingOrchestrator;
 pub use session::{SessionStore, SessionError};
 pub use task::{Job, Task, TaskId, TaskOrchestrator, TaskResult, TaskStatus, TaskError, TaskExecutor};
+pub use verify::{Verifier, VerificationResult, CheckResult, VerificationType};
 
 use std::sync::Arc;
 
@@ -115,6 +117,54 @@ impl RiftEngine {
             .with_tools(tools);
             
         orchestrator.run(job, self).await
+    }
+    
+    /// Execute a job with automatic verification
+    ///
+    /// After the job completes, verification checks are run to ensure:
+    /// - Files that were written actually exist
+    /// - Syntax of written files is valid
+    /// - Build commands succeeded
+    /// - Tests pass (if test commands were run)
+    ///
+    /// Returns both the job result and verification results.
+    pub async fn execute_job_with_verification(&self, job: &mut Job) -> Result<(task::JobResult, VerificationResult), TaskError> {
+        // Execute the job first
+        let result = self.execute_job(job).await?;
+        
+        // Run verification
+        let verifier = Verifier::new();
+        let verification = verifier.verify_job(job).await;
+        
+        Ok((result, verification))
+    }
+    
+    /// Execute a job with both self-correction AND verification
+    ///
+    /// This is the "full autonomous mode" that:
+    /// 1. Gathers context before planning
+    /// 2. Self-corrects any failures during execution
+    /// 3. Verifies all outputs after completion
+    pub async fn execute_job_autonomous(&self, job: &mut Job) -> Result<(task::JobResult, VerificationResult), TaskError> {
+        // Get list of available tools
+        let tools: Vec<String> = self.plugin_registry.list_tools()
+            .iter()
+            .map(|&s| s.to_string())
+            .collect();
+        
+        // Run with self-correction
+        let mut orchestrator = self_correct::orchestrator::SelfCorrectingOrchestrator::new()
+            .with_self_correction(self.llm_client.clone())
+            .with_max_concurrent(4)
+            .with_tools(tools);
+            
+        let result = orchestrator.run(job, self).await?;
+        
+        // Run verification
+        let verifier = Verifier::new();
+        let verification = verifier.verify_job(job).await;
+        
+        Ok((result, verification))
     }
 }
 
