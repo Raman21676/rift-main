@@ -44,6 +44,10 @@ enum Commands {
     Do {
         /// The goal to accomplish
         goal: String,
+        
+        /// Enable self-correction for failed tasks
+        #[arg(long)]
+        self_correct: bool,
     },
 
     /// Execute a single command
@@ -96,8 +100,8 @@ async fn main() -> Result<()> {
         Commands::Run { message } => {
             run_single(&engine, &message).await?;
         }
-        Commands::Do { goal } => {
-            run_goal(&engine, &goal).await?;
+        Commands::Do { goal, self_correct } => {
+            run_goal(&engine, &goal, self_correct).await?;
         }
         Commands::Tools => {
             list_tools(&engine);
@@ -282,15 +286,20 @@ async fn handle_slash_command(
     match parts[0] {
         "/help" | "/h" => {
             println!("Available commands:");
-            println!("  /help              Show this help message");
-            println!("  /plan <goal>       Plan and execute a goal autonomously");
-            println!("  /tool <name> <arg> Execute a tool directly");
-            println!("  /tools             List available tools");
-            println!("  /status            Show session status");
-            println!("  /sessions          List saved sessions");
-            println!("  /clear             Clear conversation history");
-            println!("  /model <name>      Show/switch model (requires restart)");
-            println!("  /exit, /quit       Exit the chat");
+            println!("  /help                   Show this help message");
+            println!("  /plan <goal>            Plan and execute a goal autonomously");
+            println!("  /plan --self-correct <goal>  Enable auto-retry on failure");
+            println!("  /tool <name> <arg>      Execute a tool directly");
+            println!("  /tools                  List available tools");
+            println!("  /status                 Show session status");
+            println!("  /sessions               List saved sessions");
+            println!("  /clear                  Clear conversation history");
+            println!("  /model <name>           Show/switch model (requires restart)");
+            println!("  /exit, /quit            Exit the chat");
+            println!();
+            println!("CLI Usage:");
+            println!("  rift do 'make a website'           Execute goal");
+            println!("  rift do --self-correct 'deploy app'  With auto-recovery");
             println!();
             println!("Tool examples:");
             println!("  /tool bash '{{\"command\":\"ls -la\"}}'");
@@ -354,11 +363,23 @@ async fn handle_slash_command(
             if parts.len() < 2 {
                 println!("Usage: /plan <goal>");
                 println!("Example: /plan make a snake game in HTML");
+                println!("       /plan --self-correct <goal>  (enable auto-retry on failure)");
                 return SlashResult::Continue;
             }
-            let goal = parts[1..].join(" ");
+            
+            let self_correct = parts.contains(&"--self-correct");
+            let goal_parts: Vec<&str> = parts.iter()
+                .skip(1)
+                .filter(|&&p| p != "--self-correct")
+                .copied()
+                .collect();
+            let goal = goal_parts.join(" ");
+            
             println!("Planning: {}", goal);
-            if let Err(e) = run_goal(engine, &goal).await {
+            if self_correct {
+                println!("(Self-correction enabled)");
+            }
+            if let Err(e) = run_goal(engine, &goal, self_correct).await {
                 println!("Execution failed: {}", e);
             }
         }
@@ -419,7 +440,7 @@ async fn run_single(engine: &RiftEngine, message: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run_goal(engine: &RiftEngine, goal: &str) -> Result<()> {
+async fn run_goal(engine: &RiftEngine, goal: &str, self_correct: bool) -> Result<()> {
     let agent = engine.agent();
     
     println!("🧠 Planning tasks...\n");
@@ -448,13 +469,26 @@ async fn run_goal(engine: &RiftEngine, goal: &str) -> Result<()> {
     }
     println!();
 
-    println!("⚙️  Executing...\n");
-    match engine.execute_job(&mut job).await {
+    // Execute with or without self-correction
+    let execution_result = if self_correct {
+        println!("⚙️  Executing with self-correction enabled...\n");
+        engine.execute_job_with_self_correction(&mut job).await
+    } else {
+        println!("⚙️  Executing...\n");
+        engine.execute_job(&mut job).await
+    };
+
+    match execution_result {
         Ok(result) => {
             if result.success {
                 println!("✅ All tasks completed successfully!");
             } else {
                 println!("⚠️  Some tasks failed.");
+                if self_correct {
+                    println!("   (Self-correction was attempted but couldn't resolve all issues)");
+                } else {
+                    println!("   (Hint: Use --self-correct to enable automatic retry/fix)");
+                }
             }
 
             println!("\n📊 Results:");

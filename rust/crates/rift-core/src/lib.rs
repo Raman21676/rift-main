@@ -12,6 +12,7 @@ pub mod config;
 pub mod llm;
 pub mod planner;
 pub mod plugin;
+pub mod self_correct;
 pub mod session;
 pub mod task;
 
@@ -21,6 +22,8 @@ pub use config::{ConfigFile, create_sample_config, ensure_config_dir};
 pub use llm::{FunctionTool, LlmClient, LlmConfig, Message, Role, StreamingResponse, ChatResponse, ToolCall};
 pub use planner::{Planner, PlannerError};
 pub use plugin::{Plugin, PluginRegistry, Tool, ToolOutput, ToolError, ToolManifest};
+pub use self_correct::{SelfCorrector, JobContext, FailureAnalysis, CorrectionStrategy, CorrectionResult, CorrectionError, CorrectiveTask};
+pub use self_correct::orchestrator::SelfCorrectingOrchestrator;
 pub use session::{SessionStore, SessionError};
 pub use task::{Job, Task, TaskId, TaskOrchestrator, TaskResult, TaskStatus, TaskError, TaskExecutor};
 
@@ -85,6 +88,24 @@ impl RiftEngine {
     /// Execute a job
     pub async fn execute_job(&self, job: &mut Job) -> Result<task::JobResult, TaskError> {
         self.orchestrator.run(job, self).await
+    }
+    
+    /// Execute a job with self-correction enabled
+    /// 
+    /// When tasks fail, the system will:
+    /// 1. Analyze the failure using the LLM
+    /// 2. Attempt to fix the issue (retry, modify, or add prerequisite tasks)
+    /// 3. Continue execution with corrections
+    /// 
+    /// This makes the agent more resilient to transient failures and recoverable errors.
+    pub async fn execute_job_with_self_correction(&self, job: &mut Job) -> Result<task::JobResult, TaskError> {
+        use self_correct::orchestrator::SelfCorrectingOrchestrator;
+        
+        let mut orchestrator = SelfCorrectingOrchestrator::new()
+            .with_self_correction(self.llm_client.clone())
+            .with_max_concurrent(4);
+            
+        orchestrator.run(job, self).await
     }
 }
 
