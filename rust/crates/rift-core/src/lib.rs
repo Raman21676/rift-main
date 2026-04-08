@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod capability;
 pub mod config;
+pub mod context;
 pub mod llm;
 pub mod planner;
 pub mod plugin;
@@ -19,6 +20,7 @@ pub mod task;
 pub use agent::{Agent, AgentError, ToolDefinition, ToolInvocation};
 pub use capability::{Capability, CapabilityManager, CapabilityError};
 pub use config::{ConfigFile, create_sample_config, ensure_config_dir};
+pub use context::{ContextGatherer, ProjectContext, ProjectType, GitInfo, ContextError};
 pub use llm::{FunctionTool, LlmClient, LlmConfig, Message, Role, StreamingResponse, ChatResponse, ToolCall};
 pub use planner::{Planner, PlannerError};
 pub use plugin::{Plugin, PluginRegistry, Tool, ToolOutput, ToolError, ToolManifest};

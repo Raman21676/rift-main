@@ -300,6 +300,9 @@ impl Agent {
     }
     
     /// Plan a natural language goal into an executable Job
+    /// 
+    /// This method gathers project context first (files, config, git status)
+    /// to generate more informed plans that work with the existing project structure.
     pub async fn plan_job(&self, goal: &str) -> Result<Job, AgentError> {
         let tools: Vec<String> = self.plugin_registry
             .tools()
@@ -307,8 +310,31 @@ impl Agent {
             .cloned()
             .collect();
         
+        // Gather project context before planning
+        let context: Option<crate::context::ProjectContext> = crate::context::ContextGatherer::gather(".")
+            .await
+            .ok(); // Context gathering is best-effort
+        
         let planner = Planner::new(self.llm_client.clone(), tools);
-        planner.plan(goal).await
+        
+        if let Some(ref ctx) = context {
+            planner.plan_with_context(goal, ctx).await
+        } else {
+            planner.plan(goal).await
+        }
+            .map_err(|e| AgentError::Planner(e.to_string()))
+    }
+    
+    /// Plan with explicit context (for testing or custom workflows)
+    pub async fn plan_job_with_context(&self, goal: &str, context: &crate::context::ProjectContext) -> Result<Job, AgentError> {
+        let tools: Vec<String> = self.plugin_registry
+            .tools()
+            .keys()
+            .cloned()
+            .collect();
+        
+        let planner = Planner::new(self.llm_client.clone(), tools);
+        planner.plan_with_context(goal, context).await
             .map_err(|e| AgentError::Planner(e.to_string()))
     }
 }

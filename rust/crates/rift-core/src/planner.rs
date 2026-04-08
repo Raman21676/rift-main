@@ -3,6 +3,7 @@
 //! Uses a simple line-based format that is easier for weaker LLMs to generate
 //! correctly than nested JSON.
 
+use crate::context::ProjectContext;
 use crate::llm::{LlmClient, Message};
 use crate::task::{Job, Task, TaskId};
 use serde_json::Value;
@@ -57,10 +58,66 @@ impl Planner {
             tools_list, goal
         )
     }
+    
+    /// Create a planning prompt that includes project context
+    fn build_prompt_with_context(&self, goal: &str, context: &ProjectContext) -> String {
+        use crate::context::ContextGatherer;
+        
+        let tools_list = self.available_tools.join(", ");
+        let context_str = ContextGatherer::format_for_prompt(context);
+        
+        format!(
+            "You are a task planner. Break the goal into small executable tasks.\n\
+            Available tools: {}\n\n\
+            {}\n\n\
+            Rules:\n\
+            1. One tool per task\n\
+            2. Task names should be short and use only letters, numbers, and underscores\n\
+            3. Include complete file content when using write_file\n\
+            4. Use empty dependencies if the task has no prerequisites\n\
+            5. Each task MUST be on its own line starting with TASK:\n\
+            6. Check if files already exist before creating them (see context above)\n\
+            7. Use existing project structure when possible\n\
+            8. For existing files, prefer edit_file over write_file to avoid overwriting\n\n\
+            Format for each task (exactly one per line):\n\
+            TASK: name | tool | key1=value1;key2=value2 | dependency1,dependency2\n\n\
+            Example 1:\n\
+            TASK: create_hello | write_file | path=hello.txt;content=hello world | \n\
+            TASK: show_file | read_file | path=hello.txt | create_hello\n\n\
+            Example 2:\n\
+            TASK: make_dir | bash | command=mkdir -p games | \n\
+            TASK: create_index | write_file | path=games/index.html;content=<html></html> | make_dir\n\n\
+            Example 3:\n\
+            TASK: search_rust | web_search | query=rust async tutorial | \n\
+            TASK: fetch_page | web_fetch | url=https://example.com | search_rust\n\n\
+            Important:\n\
+            - The | symbols are STRUCTURAL DELIMITERS, not part of the values\n\
+            - Separate parameters with semicolons (;)\n\
+            - Do NOT use JSON, just key=value pairs\n\
+            - For multi-line content, use \\n for newlines in write_file content\n\
+            - For bash commands: keep them simple, no unclosed quotes or parentheses\n\
+            - If a value contains a semicolon, use bash instead\n\
+            - DO NOT recreate files that already exist (check the context above)\n\
+            - Use edit_file to modify existing files, write_file only for NEW files\n\n\
+            Goal: {}",
+            tools_list, context_str, goal
+        )
+    }
 
     /// Plan a goal into a Job
     pub async fn plan(&self, goal: &str) -> Result<Job, PlannerError> {
         let prompt = self.build_prompt(goal);
+        self.execute_plan(goal, prompt).await
+    }
+    
+    /// Plan a goal with project context for better results
+    pub async fn plan_with_context(&self, goal: &str, context: &ProjectContext) -> Result<Job, PlannerError> {
+        let prompt = self.build_prompt_with_context(goal, context);
+        self.execute_plan(goal, prompt).await
+    }
+    
+    /// Execute the planning with a given prompt
+    async fn execute_plan(&self, goal: &str, prompt: String) -> Result<Job, PlannerError> {
         let response = self.llm_client.chat(vec![Message::user(prompt)]).await
             .map_err(|e| PlannerError::Llm(e.to_string()))?;
 
