@@ -64,13 +64,14 @@ pub enum DaemonResponse {
 }
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 /// Server for daemon control
 pub struct DaemonServer {
     daemon: Arc<RwLock<Daemon>>,
     socket_path: Option<PathBuf>,
     tcp_port: Option<u16>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
 }
 
 impl DaemonServer {
@@ -80,6 +81,7 @@ impl DaemonServer {
             daemon: Arc::new(RwLock::new(daemon)),
             socket_path: Some(socket_path.into()),
             tcp_port: None,
+            shutdown_tx: None,
         }
     }
 
@@ -89,11 +91,31 @@ impl DaemonServer {
             daemon: Arc::new(RwLock::new(daemon)),
             socket_path: None,
             tcp_port: Some(port),
+            shutdown_tx: None,
+        }
+    }
+    
+    /// Create from an existing Arc with shutdown channel
+    pub fn from_arc_with_shutdown(
+        daemon: Arc<RwLock<Daemon>>, 
+        socket_path: PathBuf,
+        shutdown_tx: mpsc::Sender<()>
+    ) -> Self {
+        Self {
+            daemon,
+            socket_path: Some(socket_path),
+            tcp_port: None,
+            shutdown_tx: Some(shutdown_tx),
         }
     }
 
     /// Start the server
     pub async fn start(&self) -> Result<(), DaemonError> {
+        self.run().await
+    }
+    
+    /// Run the server (blocks until error or shutdown)
+    pub async fn run(&self) -> Result<(), DaemonError> {
         if let Some(ref socket_path) = self.socket_path {
             self.run_unix_socket(socket_path).await
         } else if let Some(port) = self.tcp_port {
@@ -119,13 +141,16 @@ impl DaemonServer {
 
         info!("Daemon server listening on Unix socket: {}", socket_path.display());
 
+        let shutdown_tx = self.shutdown_tx.clone();
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let daemon = self.daemon.clone();
+                    let shutdown_tx = shutdown_tx.clone();
                     tokio::spawn(async move {
                         let daemon = daemon.read().await;
-                        if let Err(e) = Self::handle_unix_client(stream, &daemon).await {
+                        if let Err(e) = Self::handle_unix_client(stream, &daemon, &shutdown_tx).await {
                             error!("Error handling client: {}", e);
                         }
                     });
@@ -145,13 +170,16 @@ impl DaemonServer {
 
         info!("Daemon server listening on TCP port: {}", port);
 
+        let shutdown_tx = self.shutdown_tx.clone();
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let daemon = self.daemon.clone();
+                    let shutdown_tx = shutdown_tx.clone();
                     tokio::spawn(async move {
                         let daemon = daemon.read().await;
-                        if let Err(e) = Self::handle_tcp_client(stream, &daemon).await {
+                        if let Err(e) = Self::handle_tcp_client(stream, &daemon, &shutdown_tx).await {
                             error!("Error handling client: {}", e);
                         }
                     });
@@ -166,7 +194,8 @@ impl DaemonServer {
     /// Handle a Unix socket client
     async fn handle_unix_client(
         mut stream: UnixStream, 
-        daemon: &Daemon
+        daemon: &Daemon,
+        shutdown_tx: &Option<mpsc::Sender<()>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = vec![0u8; 4096];
         let n = stream.read(&mut buffer).await?;
@@ -176,7 +205,7 @@ impl DaemonServer {
         }
 
         let command: DaemonCommand = serde_json::from_slice(&buffer[..n])?;
-        let response = Self::handle_command(command, daemon).await;
+        let response = Self::handle_command(command, daemon, shutdown_tx).await;
         
         let response_json = serde_json::to_vec(&response)?;
         stream.write_all(&response_json).await?;
@@ -187,7 +216,8 @@ impl DaemonServer {
     /// Handle a TCP client
     async fn handle_tcp_client(
         mut stream: TcpStream, 
-        daemon: &Daemon
+        daemon: &Daemon,
+        shutdown_tx: &Option<mpsc::Sender<()>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = vec![0u8; 4096];
         let n = stream.read(&mut buffer).await?;
@@ -197,7 +227,7 @@ impl DaemonServer {
         }
 
         let command: DaemonCommand = serde_json::from_slice(&buffer[..n])?;
-        let response = Self::handle_command(command, daemon).await;
+        let response = Self::handle_command(command, daemon, shutdown_tx).await;
         
         let response_json = serde_json::to_vec(&response)?;
         stream.write_all(&response_json).await?;
@@ -206,7 +236,11 @@ impl DaemonServer {
     }
 
     /// Handle a command
-    async fn handle_command(command: DaemonCommand, daemon: &Daemon) -> DaemonResponse {
+    async fn handle_command(
+        command: DaemonCommand, 
+        daemon: &Daemon,
+        shutdown_tx: &Option<mpsc::Sender<()>>,
+    ) -> DaemonResponse {
         match command {
             DaemonCommand::SubmitTask { goal } => {
                 match daemon.submit_task(goal).await {
@@ -249,6 +283,10 @@ impl DaemonServer {
                 }
             }
             DaemonCommand::Stop => {
+                // Trigger shutdown
+                if let Some(ref tx) = shutdown_tx {
+                    let _ = tx.try_send(());
+                }
                 DaemonResponse::Stopping
             }
             DaemonCommand::Ping => {

@@ -15,6 +15,7 @@ pub mod llm;
 pub mod planner;
 pub mod plugin;
 pub mod self_correct;
+pub mod server;
 pub mod session;
 pub mod task;
 pub mod verify;
@@ -32,6 +33,7 @@ pub use session::{SessionStore, SessionError};
 pub use task::{Job, Task, TaskId, TaskOrchestrator, TaskResult, TaskStatus, TaskError, TaskExecutor};
 pub use verify::{Verifier, VerificationResult, CheckResult, VerificationType};
 pub use daemon::{Daemon, DaemonState, DaemonError, DaemonCommand, DaemonResponse, TaskQueue, QueuedTask, QueueStatus, DaemonClient};
+pub use server::{RemoteServer, AuthManager, generate_token, ConnectionInfo};
 
 use std::sync::Arc;
 

@@ -9,6 +9,7 @@
 use crate::task::{Job, TaskId};
 use crate::{RiftConfig, RiftEngine};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
@@ -25,9 +26,10 @@ pub use server::{DaemonServer, DaemonCommand, DaemonResponse, DaemonClient};
 pub struct Daemon {
     config: RiftConfig,
     engine: Arc<RwLock<RiftEngine>>,
-    queue: TaskQueue,
+    queue: Arc<RwLock<TaskQueue>>,
     state: Arc<RwLock<DaemonState>>,
     shutdown_tx: Option<mpsc::Sender<()>>,
+    socket_path: Option<PathBuf>,
 }
 
 /// Current state of the daemon
@@ -58,60 +60,72 @@ impl Default for DaemonState {
 
 impl Daemon {
     /// Create a new daemon instance
-    pub async fn new(config: RiftConfig) -> Result<Self, DaemonError> {
+    pub async fn new(config: RiftConfig) -> Result<Arc<RwLock<Self>>, DaemonError> {
         let engine = RiftEngine::new(config.clone());
         let queue = TaskQueue::new().await?;
         
-        Ok(Self {
+        Ok(Arc::new(RwLock::new(Self {
             config,
             engine: Arc::new(RwLock::new(engine)),
-            queue,
+            queue: Arc::new(RwLock::new(queue)),
             state: Arc::new(RwLock::new(DaemonState::default())),
             shutdown_tx: None,
-        })
+            socket_path: None,
+        })))
+    }
+    
+    /// Set the Unix socket path for the control server
+    pub fn with_socket_path(&mut self, path: impl Into<PathBuf>) {
+        self.socket_path = Some(path.into());
     }
 
-    /// Start the daemon
-    pub async fn start(&mut self) -> Result<(), DaemonError> {
+    /// Start the daemon and block until shutdown (must be called on an Arc<RwLock<Daemon>>)
+    pub async fn start(self_arc: Arc<RwLock<Self>>) -> Result<(), DaemonError> {
         info!("Starting Rift daemon...");
         
-        // Update state
-        {
-            let mut state = self.state.write().await;
-            state.running = true;
-        }
+        let socket_path = {
+            let daemon = self_arc.read().await;
+            
+            // Update state
+            {
+                let mut state = daemon.state.write().await;
+                state.running = true;
+            }
+            
+            daemon.socket_path.clone()
+        };
 
         // Create shutdown channel
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
-        self.shutdown_tx = Some(shutdown_tx);
+        let (shutdown_tx, mut shutdown_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
+        let (_server_shutdown_tx, _server_shutdown_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
+        {
+            let mut daemon = self_arc.write().await;
+            daemon.shutdown_tx = Some(shutdown_tx);
+        }
 
-        // We need to spawn a task that owns the queue
-        let engine = self.engine.clone();
-        let state = self.state.clone();
-        let config = self.config.clone();
-        
-        // Clone the db_path so we can create a new queue instance in the spawned task
-        let queue = TaskQueue::new().await?;
-
-        tokio::spawn(async move {
+        // Spawn processing loop
+        let loop_arc = self_arc.clone();
+        let processing_handle = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(5)); // Check queue every 5 seconds
             let start_time = std::time::Instant::now();
 
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
+                        let daemon = loop_arc.read().await;
+                        
                         // Update uptime
                         {
-                            let mut s = state.write().await;
+                            let mut s = daemon.state.write().await;
                             s.uptime_seconds = start_time.elapsed().as_secs();
                         }
 
                         // Process next task if available
                         if let Err(e) = Self::process_next_task(
-                            &engine, 
-                            &queue, 
-                            &state,
-                            &config
+                            &daemon.engine, 
+                            &daemon.queue, 
+                            &daemon.state,
+                            &daemon.config
                         ).await {
                             error!("Error processing task: {}", e);
                         }
@@ -124,12 +138,45 @@ impl Daemon {
             }
 
             // Update state on shutdown
-            let mut s = state.write().await;
+            let daemon = loop_arc.read().await;
+            let mut s = daemon.state.write().await;
             s.running = false;
-            info!("Daemon stopped");
+            info!("Processing loop stopped");
         });
+        
+        // Start the control server if socket path is configured
+        let server_handle = if let Some(socket_path) = socket_path {
+            let (server_shutdown_tx, mut server_shutdown_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
+            let server = DaemonServer::from_arc_with_shutdown(self_arc.clone(), socket_path, server_shutdown_tx);
+            Some(tokio::spawn(async move {
+                tokio::select! {
+                    result = server.run() => {
+                        if let Err(e) = result {
+                            error!("Control server error: {}", e);
+                        }
+                    }
+                    _ = server_shutdown_rx.recv() => {
+                        info!("Control server shutting down");
+                    }
+                }
+            }))
+        } else {
+            None
+        };
 
         info!("Rift daemon started successfully");
+        
+        // Wait for shutdown signal (block here)
+        if let Some(handle) = server_handle {
+            tokio::select! {
+                _ = handle => {},
+                _ = processing_handle => {},
+            }
+        } else {
+            processing_handle.await.ok();
+        }
+        
+        info!("Rift daemon stopped");
         Ok(())
     }
 
@@ -147,12 +194,15 @@ impl Daemon {
     /// Process the next task from the queue
     async fn process_next_task(
         engine: &Arc<RwLock<RiftEngine>>,
-        queue: &TaskQueue,
+        queue: &Arc<RwLock<TaskQueue>>,
         state: &Arc<RwLock<DaemonState>>,
         config: &RiftConfig,
     ) -> Result<(), DaemonError> {
         // Try to get next pending task
-        let next_task = queue.dequeue().await?;
+        let next_task = {
+            let q = queue.read().await;
+            q.dequeue().await?
+        };
 
         if let Some(mut task) = next_task {
             info!("Processing task: {} ({})", task.id, task.goal);
@@ -170,15 +220,18 @@ impl Daemon {
             // Update task status
             match result {
                 Ok(success) => {
+                    let mut q = queue.write().await;
                     if success {
-                        queue.mark_completed(&task.id, "Task completed successfully").await?;
+                        q.mark_completed(&task.id, "Task completed successfully").await?;
+                        drop(q); // Release queue lock before acquiring state lock
                         
                         let mut s = state.write().await;
                         s.tasks_completed += 1;
                         info!("Task {} completed successfully", task.id);
                     } else {
-                        queue.update_status(&task.id, TaskStatus::Failed).await?;
-                        queue.mark_completed(&task.id, "Task failed").await?;
+                        q.update_status(&task.id, TaskStatus::Failed).await?;
+                        q.mark_completed(&task.id, "Task failed").await?;
+                        drop(q);
                         
                         let mut s = state.write().await;
                         s.tasks_failed += 1;
@@ -186,8 +239,10 @@ impl Daemon {
                     }
                 }
                 Err(e) => {
-                    queue.update_status(&task.id, TaskStatus::Failed).await?;
-                    queue.mark_completed(&task.id, &format!("Error: {}", e)).await?;
+                    let mut q = queue.write().await;
+                    q.update_status(&task.id, TaskStatus::Failed).await?;
+                    q.mark_completed(&task.id, &format!("Error: {}", e)).await?;
+                    drop(q);
                     
                     let mut s = state.write().await;
                     s.tasks_failed += 1;
@@ -253,34 +308,40 @@ impl Daemon {
 
     /// Submit a new task to the queue
     pub async fn submit_task(&self, goal: impl Into<String>) -> Result<String, DaemonError> {
-        let task_id = self.queue.enqueue(goal.into()).await?;
+        let q = self.queue.read().await;
+        let task_id = q.enqueue(goal.into()).await?;
         info!("Submitted task: {}", task_id);
         Ok(task_id)
     }
 
     /// Get queue status
     pub async fn get_queue_status(&self) -> Result<QueueStatus, DaemonError> {
-        self.queue.get_status().await.map_err(|e| e.into())
+        let q = self.queue.read().await;
+        q.get_status().await.map_err(|e| e.into())
     }
 
     /// Get pending tasks
     pub async fn get_pending_tasks(&self) -> Result<Vec<QueuedTask>, DaemonError> {
-        self.queue.list_pending().await.map_err(|e| e.into())
+        let q = self.queue.read().await;
+        q.list_pending().await.map_err(|e| e.into())
     }
 
     /// Get recent completed tasks
     pub async fn get_recent_tasks(&self, limit: usize) -> Result<Vec<QueuedTask>, DaemonError> {
-        self.queue.list_recent(limit).await.map_err(|e| e.into())
+        let q = self.queue.read().await;
+        q.list_recent(limit).await.map_err(|e| e.into())
     }
 
     /// Cancel a pending task
     pub async fn cancel_task(&self, task_id: &str) -> Result<bool, DaemonError> {
-        self.queue.cancel(task_id).await.map_err(|e| e.into())
+        let mut q = self.queue.write().await;
+        q.cancel(task_id).await.map_err(|e| e.into())
     }
     
     /// Get a specific task by ID
     pub async fn get_task(&self, task_id: &str) -> Result<Option<QueuedTask>, DaemonError> {
-        self.queue.get_task(task_id).await.map_err(|e| e.into())
+        let q = self.queue.read().await;
+        q.get_task(task_id).await.map_err(|e| e.into())
     }
 }
 

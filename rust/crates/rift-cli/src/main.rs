@@ -69,6 +69,51 @@ enum Commands {
 
     /// Show configuration info
     Config,
+    
+    /// Daemon control commands
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommands {
+    /// Start the background daemon
+    Start {
+        /// Run in foreground (don't detach)
+        #[arg(long)]
+        foreground: bool,
+        /// Enable remote control API
+        #[arg(long)]
+        remote: bool,
+        /// Port for remote control (default: 7788)
+        #[arg(long, default_value = "7788")]
+        port: u16,
+    },
+    
+    /// Stop the daemon
+    Stop,
+    
+    /// Check daemon status
+    Status,
+    
+    /// Submit a task to the daemon queue
+    Submit {
+        /// The goal/task to accomplish
+        goal: String,
+    },
+    
+    /// List pending tasks
+    Queue,
+    
+    /// List recent completed tasks
+    History,
+    
+    /// Cancel a pending task
+    Cancel {
+        task_id: String,
+    },
 }
 
 #[tokio::main]
@@ -116,6 +161,9 @@ async fn main() -> Result<()> {
         }
         Commands::Config => {
             show_config(&config);
+        }
+        Commands::Daemon { command } => {
+            handle_daemon_command(command, config).await?;
         }
     }
 
@@ -580,4 +628,196 @@ fn list_tools(engine: &RiftEngine) {
             println!("  {} - {}", name, tool.description());
         }
     }
+}
+
+async fn handle_daemon_command(command: DaemonCommands, config: RiftConfig) -> Result<()> {
+    use rift_core::{Daemon, DaemonClient, DaemonCommand, DaemonResponse, TaskQueue, QueuedTask};
+    use rift_core::daemon::TaskStatus;
+    use std::path::PathBuf;
+    
+    let socket_path = dirs::runtime_dir()
+        .or_else(|| dirs::cache_dir())
+        .map(|d| d.join("rift").join("daemon.sock"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/rift-daemon.sock"));
+    
+    match command {
+        DaemonCommands::Start { foreground, remote, port } => {
+            println!("🚀 Starting Rift daemon...");
+            
+            // Check if daemon is already running
+            let client = DaemonClient::with_unix_socket(&socket_path);
+            if client.ping().await.unwrap_or(false) {
+                println!("Daemon is already running!");
+                return Ok(());
+            }
+            
+            if foreground {
+                // Run daemon in current process (blocking)
+                let daemon = Daemon::new(config).await?;
+                {
+                    let mut d = daemon.write().await;
+                    d.with_socket_path(&socket_path);
+                }
+                
+                println!("✅ Daemon starting in foreground...");
+                println!("Socket: {}", socket_path.display());
+                if remote {
+                    println!("Remote control: http://0.0.0.0:{}", port);
+                }
+                println!("Press Ctrl+C to stop");
+                
+                // Start remote server if enabled
+                if remote {
+                    let remote_server = rift_core::RemoteServer::new(daemon.clone(), port);
+                    tokio::spawn(async move {
+                        if let Err(e) = remote_server.run().await {
+                            eprintln!("Remote server error: {}", e);
+                        }
+                    });
+                }
+                
+                Daemon::start(daemon).await?;
+            } else {
+                // Spawn a detached child process
+                let current_exe = std::env::current_exe()?;
+                let mut cmd = std::process::Command::new(current_exe);
+                cmd.arg("daemon")
+                    .arg("start")
+                    .arg("--foreground")
+                    .env("RIFT_DAEMON", "1")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                
+                // Set up the child process to be detached (platform-specific)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    cmd.process_group(0); // Create new process group
+                }
+                
+                cmd.spawn()?;
+                
+                // Give it time to start
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                
+                // Check if started
+                let client = DaemonClient::with_unix_socket(&socket_path);
+                if client.ping().await.unwrap_or(false) {
+                    println!("✅ Daemon started successfully!");
+                    println!("Socket: {}", socket_path.display());
+                } else {
+                    println!("⚠️  Daemon may not have started properly");
+                }
+            }
+        }
+        DaemonCommands::Stop => {
+            println!("🛑 Stopping Rift daemon...");
+            
+            let client = DaemonClient::with_unix_socket(&socket_path);
+            match client.send(DaemonCommand::Stop).await {
+                Ok(DaemonResponse::Stopping) => {
+                    println!("✅ Daemon stopping...");
+                }
+                Ok(_) => {
+                    println!("⚠️  Unexpected response from daemon");
+                }
+                Err(_) => {
+                    println!("Daemon is not running");
+                }
+            }
+        }
+        DaemonCommands::Status => {
+            let client = DaemonClient::with_unix_socket(&socket_path);
+            match client.get_status().await {
+                Ok(state) => {
+                    println!("📊 Daemon Status");
+                    println!("   Running: {}", if state.running { "✅ Yes" } else { "❌ No" });
+                    println!("   Uptime: {} seconds", state.uptime_seconds);
+                    println!("   Tasks completed: {}", state.tasks_completed);
+                    println!("   Tasks failed: {}", state.tasks_failed);
+                    if let Some(ref task) = state.current_task {
+                        println!("   Current task: {} ({})", task.id, task.goal);
+                    }
+                    if let Some(ref activity) = state.last_activity {
+                        println!("   Last activity: {}", activity);
+                    }
+                }
+                Err(_) => {
+                    println!("Daemon is not running");
+                }
+            }
+        }
+        DaemonCommands::Submit { goal } => {
+            let client = DaemonClient::with_unix_socket(&socket_path);
+            match client.submit_task(&goal).await {
+                Ok(task_id) => {
+                    println!("✅ Task submitted: {}", task_id);
+                }
+                Err(_) => {
+                    println!("❌ Failed to submit task. Is the daemon running?");
+                }
+            }
+        }
+        DaemonCommands::Queue => {
+            let client = DaemonClient::with_unix_socket(&socket_path);
+            match client.send(DaemonCommand::ListPending).await {
+                Ok(DaemonResponse::TaskList(tasks)) => {
+                    if tasks.is_empty() {
+                        println!("No pending tasks");
+                    } else {
+                        println!("📋 Pending Tasks:");
+                        for task in tasks {
+                            let status_icon = match task.status {
+                                TaskStatus::Pending => "⏳",
+                                TaskStatus::Running => "▶️",
+                                _ => "❓",
+                            };
+                            println!("   {} {} - {} ({})", status_icon, &task.id[..8], task.goal, task.status);
+                        }
+                    }
+                }
+                Ok(_) => println!("Unexpected response"),
+                Err(_) => println!("Daemon is not running"),
+            }
+        }
+        DaemonCommands::History => {
+            let client = DaemonClient::with_unix_socket(&socket_path);
+            match client.send(DaemonCommand::ListRecent { limit: 10 }).await {
+                Ok(DaemonResponse::TaskList(tasks)) => {
+                    if tasks.is_empty() {
+                        println!("No completed tasks");
+                    } else {
+                        println!("📜 Recent Tasks:");
+                        for task in tasks {
+                            let icon = match task.status {
+                                TaskStatus::Completed => "✅",
+                                TaskStatus::Failed => "❌",
+                                TaskStatus::Cancelled => "🚫",
+                                _ => "❓",
+                            };
+                            println!("   {} {} - {} ({})", icon, &task.id[..8], task.goal, task.status);
+                        }
+                    }
+                }
+                Ok(_) => println!("Unexpected response"),
+                Err(_) => println!("Daemon is not running"),
+            }
+        }
+        DaemonCommands::Cancel { task_id } => {
+            let client = DaemonClient::with_unix_socket(&socket_path);
+            match client.send(DaemonCommand::CancelTask { task_id }).await {
+                Ok(DaemonResponse::Cancelled(true)) => {
+                    println!("✅ Task cancelled");
+                }
+                Ok(DaemonResponse::Cancelled(false)) => {
+                    println!("⚠️  Task not found or already running/completed");
+                }
+                Ok(_) => println!("Unexpected response"),
+                Err(_) => println!("Daemon is not running"),
+            }
+        }
+    }
+    
+    Ok(())
 }

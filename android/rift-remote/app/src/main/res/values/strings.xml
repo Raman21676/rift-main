@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Rift Remote</string>
+    <string name="title_dashboard">Dashboard</string>
+    <string name="title_queue">Queue</string>
+    <string name="title_logs">Logs</string>
+    <string name="submit_task">Submit Task</string>
+    <string name="enter_goal">Enter your goal...</string>
+    <string name="cancel">Cancel</string>
+    <string name="back">Back</string>
+    <string name="connect">Connect</string>
+    <string name="scan_qr">Scan QR Code</string>
+    <string name="manual_entry">Manual Entry</string>
+    <string name="status_online">Online</string>
+    <string name="status_offline">Offline</string>
+    <string name="no_pending_tasks">No pending tasks</string>
+    <string name="no_completed_tasks">No completed tasks</string>
+    <string name="task_submitted">Task submitted!</string>
+    <string name="clear_logs">Clear Logs</string>
+</resources>
