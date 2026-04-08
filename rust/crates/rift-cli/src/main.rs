@@ -48,6 +48,14 @@ enum Commands {
         /// Enable self-correction for failed tasks
         #[arg(long)]
         self_correct: bool,
+        
+        /// Enable verification of task outputs
+        #[arg(long)]
+        verify: bool,
+        
+        /// Full autonomous mode (context + self-correct + verify)
+        #[arg(long)]
+        auto: bool,
     },
 
     /// Execute a single command
@@ -100,8 +108,8 @@ async fn main() -> Result<()> {
         Commands::Run { message } => {
             run_single(&engine, &message).await?;
         }
-        Commands::Do { goal, self_correct } => {
-            run_goal(&engine, &goal, self_correct).await?;
+        Commands::Do { goal, self_correct, verify, auto } => {
+            run_goal(&engine, &goal, self_correct, verify, auto).await?;
         }
         Commands::Tools => {
             list_tools(&engine);
@@ -298,8 +306,15 @@ async fn handle_slash_command(
             println!("  /exit, /quit            Exit the chat");
             println!();
             println!("CLI Usage:");
-            println!("  rift do 'make a website'           Execute goal");
-            println!("  rift do --self-correct 'deploy app'  With auto-recovery");
+            println!("  rift do 'make a website'              Execute goal");
+            println!("  rift do --self-correct 'deploy app'   With auto-recovery");
+            println!("  rift do --verify 'create app'         With verification");
+            println!("  rift do --auto 'build project'        Full autonomous mode");
+            println!();
+            println!("Mode flags can be combined:");
+            println!("  --self-correct  Auto-retry failed tasks");
+            println!("  --verify        Verify outputs after completion");
+            println!("  --auto          Enable all autonomous features");
             println!();
             println!("Tool examples:");
             println!("  /tool bash '{{\"command\":\"ls -la\"}}'");
@@ -364,22 +379,30 @@ async fn handle_slash_command(
                 println!("Usage: /plan <goal>");
                 println!("Example: /plan make a snake game in HTML");
                 println!("       /plan --self-correct <goal>  (enable auto-retry on failure)");
+                println!("       /plan --verify <goal>        (verify outputs)");
+                println!("       /plan --auto <goal>          (full autonomous mode)");
                 return SlashResult::Continue;
             }
             
             let self_correct = parts.contains(&"--self-correct");
+            let verify = parts.contains(&"--verify");
+            let auto = parts.contains(&"--auto");
+            
             let goal_parts: Vec<&str> = parts.iter()
                 .skip(1)
-                .filter(|&&p| p != "--self-correct")
+                .filter(|&&p| p != "--self-correct" && p != "--verify" && p != "--auto")
                 .copied()
                 .collect();
             let goal = goal_parts.join(" ");
             
             println!("Planning: {}", goal);
-            if self_correct {
-                println!("(Self-correction enabled)");
+            if auto {
+                println!("(Full autonomous mode: context + self-correct + verify)");
+            } else {
+                if self_correct { println!("(Self-correction enabled)"); }
+                if verify { println!("(Verification enabled)"); }
             }
-            if let Err(e) = run_goal(engine, &goal, self_correct).await {
+            if let Err(e) = run_goal(engine, &goal, self_correct, verify, auto).await {
                 println!("Execution failed: {}", e);
             }
         }
@@ -440,7 +463,7 @@ async fn run_single(engine: &RiftEngine, message: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run_goal(engine: &RiftEngine, goal: &str, self_correct: bool) -> Result<()> {
+async fn run_goal(engine: &RiftEngine, goal: &str, self_correct: bool, verify: bool, auto: bool) -> Result<()> {
     let agent = engine.agent();
     
     println!("🧠 Planning tasks...\n");
@@ -469,25 +492,46 @@ async fn run_goal(engine: &RiftEngine, goal: &str, self_correct: bool) -> Result
     }
     println!();
 
-    // Execute with or without self-correction
-    let execution_result = if self_correct {
+    // Execute based on selected mode
+    let (execution_result, verification) = if auto {
+        println!("🤖 Executing in FULL AUTONOMOUS mode (context + self-correct + verify)...\n");
+        let (result, verification) = engine.execute_job_autonomous(&mut job).await?;
+        (Ok(result), Some(verification))
+    } else if verify {
+        println!("⚙️  Executing with verification...\n");
+        let (result, verification) = engine.execute_job_with_verification(&mut job).await?;
+        (Ok(result), Some(verification))
+    } else if self_correct {
         println!("⚙️  Executing with self-correction enabled...\n");
-        engine.execute_job_with_self_correction(&mut job).await
+        (engine.execute_job_with_self_correction(&mut job).await, None)
     } else {
         println!("⚙️  Executing...\n");
-        engine.execute_job(&mut job).await
+        (engine.execute_job(&mut job).await, None)
     };
 
     match execution_result {
         Ok(result) => {
             if result.success {
                 println!("✅ All tasks completed successfully!");
+                
+                // Show verification results if available
+                if let Some(verification) = verification {
+                    println!("\n🔍 Verification Results:");
+                    println!("   {}", verification.summary);
+                    for check in &verification.checks {
+                        let icon = if check.passed { "✅" } else { "❌" };
+                        println!("   {} {}", icon, check.name);
+                        if !check.passed {
+                            println!("      Details: {}", check.details);
+                        }
+                    }
+                }
             } else {
                 println!("⚠️  Some tasks failed.");
-                if self_correct {
+                if self_correct || auto {
                     println!("   (Self-correction was attempted but couldn't resolve all issues)");
                 } else {
-                    println!("   (Hint: Use --self-correct to enable automatic retry/fix)");
+                    println!("   (Hint: Use --self-correct or --auto for automatic recovery)");
                 }
             }
 
